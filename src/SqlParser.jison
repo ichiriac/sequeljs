@@ -1,8 +1,3 @@
-/**
- * Still pending:
- *  - UNION
- */
-
 /* description: Parses SQL */
 /* :tabSize=4:indentSize=4:noTabs=true: */
 %lex
@@ -11,17 +6,20 @@
 
 %%
 
+[/][*](.|\n)*?[*][/]                             /* skip comments */
 [a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*   return 'QUALIFIED_IDENTIFIER'
 [a-zA-Z_][a-zA-Z0-9_]*\.\*                       return 'QUALIFIED_STAR'
 \s+                                              /* skip whitespace */
 'SELECT'                                         return 'SELECT'
+'TOP'                                            return 'TOP'
 'FROM'                                           return 'FROM'
 'WHERE'                                          return 'WHERE'
 'DISTINCT'                                       return 'DISTINCT'
 'BETWEEN'                                        return 'BETWEEN'
-'GROUP BY'                                       return 'GROUP_BY'
+GROUP\s+BY\b                                     return 'GROUP_BY'
 'HAVING'                                         return 'HAVING'
-'ORDER BY'                                       return 'ORDER_BY'
+ORDER\s+BY\b                                     return 'ORDER_BY'
+(UNION\s+ALL|UNION|INTERSECT|EXCEPT)\b           return 'SET_OPERATOR'
 ','                                              return 'COMMA'
 '+'                                              return 'PLUS'
 '-'                                              return 'MINUS'
@@ -49,14 +47,15 @@
 'AND'                                            return 'LOGICAL_AND'
 'OR'                                             return 'LOGICAL_OR'
 'NOT'                                            return 'LOGICAL_NOT'
-'INNER'                                          return 'INNER'
-'OUTER'                                          return 'OUTER'
-'JOIN'                                           return 'JOIN'
-'LEFT'                                           return 'LEFT'
-'RIGHT'                                          return 'RIGHT'
-'FULL'                                           return 'FULL'
-'NATURAL'                                        return 'NATURAL'
-'CROSS'                                          return 'CROSS'
+INNER\s+JOIN\b                                   return 'INNER_JOIN'
+LEFT\s+OUTER\s+JOIN\b                            return 'LEFT_OUTER_JOIN'
+RIGHT\s+OUTER\s+JOIN\b                           return 'RIGHT_OUTER_JOIN'
+JOIN\b                                           return 'JOIN'
+LEFT\s+JOIN\b                                    return 'LEFT_JOIN'
+RIGHT\s+JOIN\b                                   return 'RIGHT_JOIN'
+FULL\s+JOIN\b                                    return 'FULL_JOIN'
+NATURAL\s+JOIN\b                                 return 'NATURAL_JOIN'
+CROSS\s+JOIN\b                                   return 'CROSS_JOIN'
 'CASE'                                           return 'CASE'
 'WHEN'                                           return 'WHEN'
 'THEN'                                           return 'THEN'
@@ -68,11 +67,16 @@
 'NULLS'                                          return 'NULLS'
 'FIRST'                                          return 'FIRST'
 'LAST'                                           return 'LAST'
-['](\\.|[^'])*[']                                return 'STRING'
+'OPTION'                                         return 'OPTION'
+'WITH'                                           return 'WITH'
+'CAST'                                           return 'CAST'
+N?['](\\.|[^'])*[']                              return 'STRING'
 'NULL'                                           return 'NULL'
-(true|false)                                     return 'BOOLEAN'
+(true|false)\b                                   return 'BOOLEAN'
 [0-9]+(\.[0-9]+)?                                return 'NUMERIC'
 [a-zA-Z_][a-zA-Z0-9_]*                           return 'IDENTIFIER'
+["][a-zA-Z_][a-zA-Z0-9_]*["]                     return 'QUOTED_IDENTIFIER'
+[?]                                              return 'BIND'
 <<EOF>>                                          return 'EOF'
 .                                                return 'INVALID'
 
@@ -87,10 +91,24 @@ main
     ;
 
 selectClause
-    : SELECT selectExprList 
-      FROM tableExprList
-      optWhereClause optGroupByClause optHavingClause optOrderByClause
-      { $$ = {nodeType: 'Select', columns: $2, from: $4, where:$5, groupBy:$6, having:$7, orderBy:$8}; }
+    : expressionPlus { $$ = $1; }
+    ;
+
+selectClauseItem
+    : SELECT optDistinctClause optTopClause selectExprList 
+      optTableExprList
+      optWhereClause optGroupByClause optHavingClause optOrderByClause optQueryHintsClause
+      { $$ = {nodeType: 'Select', distinct: $2, top: $3, columns: $4, from: $5, where:$6, groupBy:$7, having:$8, orderBy:$9, queryHints:$10}; }
+    ;
+
+optDistinctClause
+    : { $$ = false; }
+    | DISTINCT { $$ = true; }
+    ;
+
+optTopClause
+    : { $$ = null; }
+    | TOP NUMERIC { $$ = $2; }
     ;
 
 optWhereClause
@@ -133,6 +151,21 @@ optOrderByNulls
     | NULLS FIRST { $$ = 'NULLS FIRST'; }
     | NULLS LAST { $$ = 'NULLS LAST'; }
     ;
+
+optQueryHintsClause
+    : { $$ = null; }
+    | OPTION LPAREN queryHintList RPAREN { $$ = $3; }
+    ;
+
+queryHintList
+    : queryHintList COMMA queryHint { $$ = $1; $1.push($3); }
+    | queryHint { $$ = [$1]; }
+    ;
+
+queryHint
+    : queryHint IDENTIFIER { $$ = $1; $1.push($2); }
+    | IDENTIFIER { $$ = [$1]; }
+    ;
     
 selectExprList
     : selectExpr { $$ = [$1]; } 
@@ -145,6 +178,11 @@ selectExpr
     | expression optTableExprAlias  { $$ = {nodeType: 'Column', value:$1, alias:$2}; }
     ;
 
+optTableExprList
+    : { $$ = []; }
+    | FROM tableExprList { $$ = $2; }
+    ;
+
 tableExprList
     : tableExpr { $$ = [$1]; }
     | tableExprList COMMA tableExpr { $$ = $1; $1.push($3); }
@@ -152,12 +190,12 @@ tableExprList
 
 tableExpr
     : joinComponent { $$ = {nodeType:'TableExpr', value: [$1]}; }
-    | tableExpr optJoinModifier JOIN joinComponent { $$ = $1; $1.value.push({nodeType:'TableExpr', value: $4, modifier:$2}); }
-    | tableExpr optJoinModifier JOIN joinComponent ON expression { $$ = $1; $1.value.push({nodeType:'TableExpr', value: $4, modifier:$2, expression:$6}); }
+    | tableExpr optJoinModifier joinComponent { $$ = $1; $1.value.push({nodeType:'TableExpr', value: $3, modifier:$2}); }
+    | tableExpr optJoinModifier joinComponent ON expression { $$ = $1; $1.value.push({nodeType:'TableExpr', value: $3, modifier:$2, expression:$5}); }
     ;
 
 joinComponent
-    : tableExprPart optTableExprAlias { $$ = {exprName: $1, alias: $2}; }
+    : tableExprPart optTableExprAlias optTableHintsClause { $$ = {exprName: $1, alias: $2, tableHints: $3}; }
     ;
 
 tableExprPart
@@ -172,16 +210,33 @@ optTableExprAlias
     | AS IDENTIFIER { $$ = {value: $2, includeAs: 1}; }
     ;
 
+optTableHintsClause
+    : { $$ = null; }
+    | WITH LPAREN tableHintList RPAREN { $$ = $3; }
+    ;
+
+tableHintList
+    : tableHintList COMMA IDENTIFIER { $$ = $1; $1.push($3); }
+    | IDENTIFIER { $$ = [$1]; }
+    ;
+    
 optJoinModifier
-    : { $$ = ''; }
-    | LEFT        { $$ = 'LEFT'; }
-    | LEFT OUTER  { $$ = 'LEFT OUTER'; }
-    | RIGHT       { $$ = 'RIGHT'; }
-    | RIGHT OUTER { $$ = 'RIGHT OUTER'; }
-    | FULL        { $$ = 'FULL'; }
-    | INNER       { $$ = 'INNER'; }
-    | CROSS       { $$ = 'CROSS'; }
-    | NATURAL     { $$ = 'NATURAL'; }
+    : JOIN             { $$ = ''; }
+    | LEFT_JOIN        { $$ = 'LEFT'; }
+    | LEFT_OUTER_JOIN  { $$ = 'LEFT OUTER'; }
+    | RIGHT_JOIN       { $$ = 'RIGHT'; }
+    | RIGHT_OUTER_JOIN { $$ = 'RIGHT OUTER'; }
+    | FULL_JOIN        { $$ = 'FULL'; }
+    | INNER_JOIN       { $$ = 'INNER'; }
+    | CROSS_JOIN       { $$ = 'CROSS'; }
+    | NATURAL_JOIN     { $$ = 'NATURAL'; }
+    ;
+
+expressionPlus
+    : expressionPlus SET_OPERATOR selectClauseItem { $$ = $1; $1.push({nodeType:'SetOperator', value:$2}); $1.push($3); }
+    | expressionPlus SET_OPERATOR expression { $$ = $1; $1.push({nodeType:'SetOperator', value:$2}); $1.push($3); }
+    | selectClauseItem { $$ = [$1] }
+    | expression { $$ = [$1] }
     ;
 
 expression
@@ -234,10 +289,13 @@ rhsIsTest
     ;
     
 rhsInTest
-    : IN LPAREN selectClause RPAREN { $$ = { nodeType: 'RhsInSelect', value: $3 }; }
-    | LOGICAL_NOT IN LPAREN selectClause RPAREN { $$ = { nodeType: 'RhsInSelect', value: $4, not:1 }; }
-    | IN LPAREN commaSepExpressionList RPAREN { $$ = { nodeType: 'RhsInExpressionList', value: $3 }; }
-    | LOGICAL_NOT IN LPAREN commaSepExpressionList RPAREN { $$ = { nodeType: 'RhsInExpressionList', value: $4, not:1 }; }
+    : IN LPAREN rhsInClause RPAREN { $$ = $3; }
+    | LOGICAL_NOT IN LPAREN rhsInClause RPAREN { $$ = $4; $4.not = 1; }
+    ;
+
+rhsInClause
+    : selectClause { $$ = { nodeType: 'RhsInSelect', value: $1}; }
+    | expression COMMA commaSepExpressionList { $$ = { nodeType: 'RhsInExpressionList', value: $3}; $3.unshift($1); }
     ;
 
 commaSepExpressionList
@@ -298,11 +356,23 @@ factor
 term
     : value { $$ = {nodeType: 'Term', value: $1}; }
     | IDENTIFIER { $$ = {nodeType: 'Term', value: $1}; }
+    | QUOTED_IDENTIFIER { $$ = {nodeType: 'Term', value: $1}; }
     | QUALIFIED_IDENTIFIER { $$ = {nodeType: 'Term', value: $1}; }
     | caseWhen { $$ = $1; }
-    | LPAREN expression RPAREN { $$ = {nodeType: 'Term', value: $2}; }
+    | LPAREN expressionPlus RPAREN { $$ = {nodeType: 'Term', value: $2}; }
     | IDENTIFIER LPAREN optFunctionExpressionList RPAREN { $$ = {nodeType: 'FunctionCall', name: $1, args: $3}; }
     | QUALIFIED_IDENTIFIER LPAREN optFunctionExpressionList RPAREN { $$ = {nodeType: 'FunctionCall', name: $1, args: $3}; }
+    | CAST LPAREN expression AS dataType RPAREN { $$ = {nodeType: 'Cast', expression:$3, dataType:$5}; }
+    ;
+
+dataType
+    : IDENTIFIER optDataTypeLength { $$ = {name: $1, len: $2}; }
+    | QUOTED_IDENTIFIER optDataTypeLength { $$ = {name: $1, len: $2}; }
+    ;
+
+optDataTypeLength
+    : { $$ = null; }
+    | LPAREN NUMERIC RPAREN { $$ = $2; }
     ;
 
 caseWhen
@@ -324,5 +394,6 @@ value
     | NUMERIC { $$ = $1; }
     | BOOLEAN { $$ = $1; }
     | NULL { $$ = $1; }
+    | BIND { $$ = $1; }
     ;
 

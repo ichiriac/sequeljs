@@ -20,7 +20,7 @@ var SqlPrettyPrinter = {
   format: function(query, settings) {
     var ast = null
     try {
-      ast = SqlParser.parse(query)
+      ast = parser.parse(query)
     } catch(e) {
       return e
     }
@@ -36,12 +36,14 @@ var SqlPrettyPrinter = {
           this.buffer = this.buffer + s
           SqlPrettyPrinter.buffer = this.buffer
       },
-      write: function(st) {
+      write: function(st, suppressPrepend) {
         var prepend = ' '
         if (st == ',' || st == '' || st == ')' || st == 'SELECT') prepend = ''
 
         if (this.prevChar =='(') prepend = ''
-        
+
+        if (suppressPrepend) prepend = ''
+
         this.appendToBuffer(prepend + st)
         this.prevChar = st
       },
@@ -57,8 +59,8 @@ var SqlPrettyPrinter = {
       lastLinePositionElem: function() {
         return this.linePositions[this.linePositions.length - 1]
       },
-      openParen: function() {
-        this.write('(')
+      openParen: function(suppressPrepend) {
+        this.write('(', suppressPrepend)
       },
       closeParen: function() {
         this.write(')')
@@ -103,6 +105,9 @@ var SqlPrettyPrinter = {
     return SqlPrettyPrinter.buffer
   },
   formatSelect: function(node, driver) {
+    this.formatExpressionPlus(node, driver)
+  },
+  formatSelectItem: function(node, driver) {
     var leftSize = 6
     for (var keyword in SqlPrettyPrinter.keywords) {
       if (node[keyword]) leftSize = Math.max(leftSize, SqlPrettyPrinter.keywords[keyword].length)
@@ -111,6 +116,13 @@ var SqlPrettyPrinter = {
     driver.saveCurrentPos(leftSize)
     driver.writeLeftKeyword('SELECT')
 
+    if (node.distinct) {
+        driver.writeKeyword('DISTINCT');
+    }
+    if (node.top) {
+        driver.writeKeyword('TOP');
+        driver.write(node.top);
+    }
     for (var i = 0; i < node.columns.length; i++) {
       this.formatColumn(node.columns[i], driver)
       if (node.columns.length > 1 && i != (node.columns.length - 1)) {
@@ -118,18 +130,21 @@ var SqlPrettyPrinter = {
         driver.wrapToRight()
       }
     }
-    driver.writeLeftKeyword('FROM')
-    for (var i = 0; i < node.from.length; i++) {
-      this.formatFrom(node.from[i], driver)
-      if (node.from.length > 1 && i != (node.from.length - 1)) {
-        driver.write(',')
-        driver.wrapToRight()
-      }            
+    if (node.from.length) {
+      driver.writeLeftKeyword('FROM')
+      for (var i = 0; i < node.from.length; i++) {
+        this.formatFrom(node.from[i], driver)
+        if (node.from.length > 1 && i != (node.from.length - 1)) {
+          driver.write(',')
+          driver.wrapToRight()
+        }            
+      }
     }
     if (node.where) this.formatWhere(node.where, driver)
     if (node.groupBy) this.formatGroupBy(node.groupBy, driver)
     if (node.having) this.formatHaving(node.having, driver)
     if (node.orderBy) this.formatOrderBy(node.orderBy, driver)
+    if (node.queryHints) this.formatQueryHints(node.queryHints, driver)
     
     driver.restoreCurrentPos()
   },
@@ -153,8 +168,25 @@ var SqlPrettyPrinter = {
       	this.formatCondition(node[i], driver)
       }
   },
+  formatExpressionPlus: function(node, driver) {
+    driver.saveCurrentPos(0)
+    for (var i = 0; i < node.length; i++) {
+      if (node[i].nodeType === 'Select') {
+        this.formatSelectItem(node[i], driver);
+      } else if (node[i].nodeType === 'SetOperator') {
+        driver.wrapToRight()
+        driver.writeKeyword(node[i].value)
+        driver.wrapToRight()
+      } else {
+        this.formatExpression(node[i], driver)
+      }
+    }
+    driver.restoreCurrentPos()
+  },
   formatExpression: function(node, driver) {
-    if (node.nodeType == 'AndCondition') {
+    if (node.nodeType === 'Select') {
+      this.formatSelectItem(node, driver);
+    } else if (node.nodeType == 'AndCondition') {
       this.formatAndChain(node.value, driver)
     } else {
       /* OrCondition */
@@ -189,6 +221,17 @@ var SqlPrettyPrinter = {
       driver.closeParen()
     }
     this.formatAlias(node, driver)
+    if (node.tableHints) {
+      driver.writeKeyword('WITH')
+      driver.openParen()
+      for (var i = 0; i < node.tableHints.length; i++) {
+        driver.writeKeyword(node.tableHints[i])
+        if (i != (node.tableHints.length - 1)) { 
+          driver.write(',')
+        }
+      }
+      driver.closeParen()
+    }
   },
   formatWhere: function(node, driver) {
     driver.writeLeftKeyword('WHERE')
@@ -244,7 +287,7 @@ var SqlPrettyPrinter = {
       } else {
         /* Sub expression */
         driver.openParen()
-        this.formatExpression(node.value, driver)
+        this.formatExpressionPlus(node.value, driver);
         driver.closeParen()
       }
     } else if (node.nodeType == 'Operand'
@@ -290,6 +333,20 @@ var SqlPrettyPrinter = {
       driver.restoreCurrentPos()
       driver.writeLeftKeyword('END')
       driver.restoreCurrentPos()
+    } else if (node.nodeType == 'Select') {
+      this.formatSelectItem(node.value, driver)
+    } else if (node.nodeType == 'Cast') {
+      driver.writeKeyword('CAST')
+      driver.openParen(true)
+      this.formatExpression(node.expression, driver)
+      driver.writeKeyword('AS')
+      driver.writeKeyword(node.dataType.name)
+      if (node.dataType.len !== null) {
+        driver.openParen(true)
+        driver.writeKeyword(node.dataType.len)
+        driver.closeParen()
+      }
+      driver.closeParen()
     }
   },
   formatRhs: function(node, driver) {
@@ -334,5 +391,19 @@ var SqlPrettyPrinter = {
       driver.writeKeyword('LIKE')
       this.formatOperand(node.value, driver)
     }
+  },
+  formatQueryHints: function(node, driver) {
+    driver.writeLeftKeyword('OPTION')
+    driver.openParen()
+    for (var i = 0; i < node.length; i++) {
+      var elem = node[i]
+      for (var j = 0; j < elem.length; j++) {
+        driver.writeUsingSettingsCase(elem[j], 'identifier')
+      }
+      if (i != (node.length - 1)) {
+        driver.write(',')
+      }
+    }
+    driver.closeParen()
   }
 }
